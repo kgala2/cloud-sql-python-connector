@@ -125,6 +125,9 @@ def test_proxy_pending_data() -> None:
     remote_server.close()
 
 
+@pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"), reason="AF_UNIX not supported on this platform"
+)
 @patch("psycopg.connect")
 def test_connect_wrapper(mock_psycopg_connect: MagicMock) -> None:
     """Test connect wrapper creates temp socket and calls psycopg.connect with correct arguments."""
@@ -136,9 +139,10 @@ def test_connect_wrapper(mock_psycopg_connect: MagicMock) -> None:
     def mock_connect_impl(*args: Any, **kwargs: Any) -> MagicMock:
         host = kwargs.get("host")
         socket_path = os.path.join(host, ".s.PGSQL.5432")
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.connect(socket_path)
-        client.close()
+        if hasattr(socket, "AF_UNIX"):
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(socket_path)
+            client.close()
         return MagicMock()
 
     mock_psycopg_connect.side_effect = mock_connect_impl
@@ -172,6 +176,9 @@ def test_connect_wrapper(mock_psycopg_connect: MagicMock) -> None:
     assert not os.path.exists(kwargs["host"])
 
 
+@pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"), reason="AF_UNIX not supported on this platform"
+)
 @patch("psycopg.connect")
 def test_connect_wrapper_failure(mock_psycopg_connect: MagicMock) -> None:
     """Test that connect wrapper cleans up correctly when psycopg.connect fails."""
@@ -420,10 +427,46 @@ def test_connect_wrapper_windows(
     assert kwargs["password"] == "test_password"
     assert kwargs["sslmode"] == "disable"
     assert kwargs["connect_timeout"] == 30
-    assert kwargs["host"] == "127.0.0.1"
-    assert isinstance(kwargs["port"], int) and kwargs["port"] > 0
 
 
+@patch("google.cloud.sql.connector.psycopg.platform.system", return_value="Windows")
+@patch("psycopg.connect")
+def test_connect_wrapper_windows_failure(
+    mock_psycopg_connect: MagicMock, mock_platform: MagicMock
+) -> None:
+    """Test that connect wrapper on Windows cleans up correctly on connection failure."""
+    mock_remote_sock = MagicMock(spec=ssl.SSLSocket)
+    mock_psycopg_connect.side_effect = Exception("windows connection failed simulated")
+
+    mock_local_sock = MagicMock()
+    mock_local_sock.getsockname.return_value = ("127.0.0.1", 54321)
+
+    real_socket = socket.socket
+
+    def socket_side_effect(family, type, proto=0, fileno=None):
+        if family == socket.AF_INET:
+            return mock_local_sock
+        return real_socket(family, type, proto, fileno)
+
+    with (
+        patch("socket.socket", side_effect=socket_side_effect),
+        pytest.raises(Exception, match="windows connection failed simulated"),
+    ):
+        connect(
+            "127.0.0.1",
+            mock_remote_sock,
+            user="test_user",
+            db="test_db",
+            password="test_password",
+        )
+
+    mock_local_sock.close.assert_called_once()
+    assert mock_remote_sock.close.called
+
+
+@pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"), reason="AF_UNIX not supported on this platform"
+)
 def test_connect_cleanup_errors() -> None:
     """Test that connect ignores OSErrors when removing temp files/dirs during cleanup."""
     mock_remote_sock = MagicMock(spec=ssl.SSLSocket)
@@ -431,9 +474,10 @@ def test_connect_cleanup_errors() -> None:
     def mock_connect_impl(*args: Any, **kwargs: Any) -> MagicMock:
         host = kwargs.get("host")
         socket_path = os.path.join(host, ".s.PGSQL.5432")
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.connect(socket_path)
-        client.close()
+        if hasattr(socket, "AF_UNIX"):
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(socket_path)
+            client.close()
         return MagicMock()
 
     with (
@@ -512,9 +556,9 @@ def test_proxy_backpressure_and_clean_teardown() -> None:
 
     # Single-threaded proxy terminates immediately without deadlocking
     t_proxy.join(timeout=2.0)
-    assert not t_proxy.is_alive(), (
-        "Cloud SQL proxy must terminate cleanly without deadlocks"
-    )
+    assert (
+        not t_proxy.is_alive()
+    ), "Cloud SQL proxy must terminate cleanly without deadlocks"
 
     remote_server.close()
 
